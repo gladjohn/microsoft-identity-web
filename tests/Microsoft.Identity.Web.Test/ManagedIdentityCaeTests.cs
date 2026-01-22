@@ -36,6 +36,11 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
         private const string VaultBaseUrl = "https://my-vault.vault.azure.net/";
         private const string SecretPath = "secrets/mySecret";
 
+        // Token revocation test constants
+        private const string SecretAfterRevocation = "SecretAfterRevocation";
+        private const string UamiSecretAfterRevocation = "UamiSecretAfterRevocation";
+        private const string Cp1SecretAfterRevocation = "Cp1SecretAfterRevocation";
+
         private sealed record VaultSecret(string Value);
 
         // Helper method to create a 401 response with token revocation claims challenge
@@ -328,7 +333,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("{ \"value\": \"SecretAfterRevocation\" }",
+                Content = new StringContent($"{{ \"value\": \"{SecretAfterRevocation}\" }}",
                                             Encoding.UTF8, "application/json")
             });
 
@@ -360,7 +365,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             // Assert
             Assert.NotNull(result);
-            Assert.Equal("SecretAfterRevocation", result!.Value);
+            Assert.Equal(SecretAfterRevocation, result!.Value);
 
             // Verify two calls to auth provider - initial + retry after revocation
             await authProvider.Received(2).CreateAuthorizationHeaderAsync(
@@ -403,7 +408,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("{ \"value\": \"UamiSecretAfterRevocation\" }",
+                Content = new StringContent($"{{ \"value\": \"{UamiSecretAfterRevocation}\" }}",
                                             Encoding.UTF8, "application/json")
             });
 
@@ -438,7 +443,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             // Assert
             Assert.NotNull(result);
-            Assert.Equal("UamiSecretAfterRevocation", result!.Value);
+            Assert.Equal(UamiSecretAfterRevocation, result!.Value);
 
             // Verify two calls to auth provider - initial + retry after revocation
             await authProvider.Received(2).CreateAuthorizationHeaderAsync(
@@ -549,7 +554,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent("{ \"value\": \"Cp1SecretAfterRevocation\" }",
+                Content = new StringContent($"{{ \"value\": \"{Cp1SecretAfterRevocation}\" }}",
                                             Encoding.UTF8, "application/json")
             });
 
@@ -578,7 +583,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
             // Assert
             Assert.NotNull(result);
-            Assert.Equal("Cp1SecretAfterRevocation", result!.Value);
+            Assert.Equal(Cp1SecretAfterRevocation, result!.Value);
 
             // Verify claims were passed on retry
             Assert.Equal(revocationClaimsB64, capturedOptions!.AcquireTokenOptions.Claims);
