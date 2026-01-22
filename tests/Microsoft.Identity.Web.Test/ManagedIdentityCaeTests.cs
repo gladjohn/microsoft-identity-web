@@ -36,7 +36,24 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
         private const string VaultBaseUrl = "https://my-vault.vault.azure.net/";
         private const string SecretPath = "secrets/mySecret";
 
+        // Token revocation test constants
+        private const string SecretAfterRevocation = "SecretAfterRevocation";
+        private const string UamiSecretAfterRevocation = "UamiSecretAfterRevocation";
+        private const string Cp1SecretAfterRevocation = "Cp1SecretAfterRevocation";
+
         private sealed record VaultSecret(string Value);
+
+        // Helper method to create a 401 response with token revocation claims challenge
+        private static HttpResponseMessage CreateTokenRevocationResponse(string claimsChallenge)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            response.Headers.WwwAuthenticate.ParseAdd(
+                $"Bearer realm=\"\", " +
+                $"error=\"insufficient_claims\", " +
+                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
+                $"claims=\"{claimsChallenge}\"");
+            return response;
+        }
 
         [Fact]
         public async Task ManagedIdentity_ReturnsBearerHeader()
@@ -284,6 +301,292 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
                 Arg.Any<CancellationToken>());                           // called twice
 
             Assert.Equal(challengeB64, capturedOpts!.AcquireTokenOptions.Claims);
+        }
+
+        [Fact]
+        public async Task ManagedIdentity_TokenRevocation_SystemAssigned_TriggersRetryWithClaims()
+        {
+            // Arrange - Simulate token revocation scenario with system-assigned MI
+            TokenAcquirerFactoryTesting.ResetTokenAcquirerFactoryInTest();
+            var factory = TokenAcquirerFactory.GetDefaultInstance();
+
+            // Token revocation claims challenge
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
+
+            // Mock auth provider
+            var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
+            DownstreamApiOptions? capturedOptions = null;
+
+            authProvider.CreateAuthorizationHeaderAsync(
+                    Arg.Any<IEnumerable<string>>(),
+                    Arg.Do<DownstreamApiOptions>(o => capturedOptions = o),
+                    Arg.Any<ClaimsPrincipal?>(),
+                    Arg.Any<CancellationToken>())
+                .Returns(ci => "Bearer first-token",
+                         ci => "Bearer second-token-after-revocation");
+
+            // Queue handler: 401 with token revocation - 200 OK
+            var queue = new QueueHttpMessageHandler();
+
+            // 401 response with TokenIssuedBeforeRevocationTimestamp
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
+
+            queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{ \"value\": \"{SecretAfterRevocation}\" }}",
+                                            Encoding.UTF8, "application/json")
+            });
+
+            // DI container
+            var services = new ServiceCollection();
+            services.AddHttpClient("RevocationTestService")
+                    .ConfigurePrimaryHttpMessageHandler(() => queue);
+            services.AddLogging();
+            services.AddTokenAcquisition();
+            services.AddSingleton(authProvider);
+
+            services.AddDownstreamApi("RevocationTestService", opts =>
+            {
+                opts.BaseUrl = "https://api.contoso.com/";
+                opts.RelativePath = "data";
+                opts.RequestAppToken = true;
+                opts.Scopes = [Scope];
+                opts.AcquireTokenOptions = new AcquireTokenOptions
+                {
+                    ManagedIdentity = new ManagedIdentityOptions() // system-assigned
+                };
+            });
+
+            var sp = services.BuildServiceProvider();
+            var api = sp.GetRequiredService<IDownstreamApi>();
+
+            // Act
+            VaultSecret? result = await api.GetForAppAsync<VaultSecret>("RevocationTestService");
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(SecretAfterRevocation, result!.Value);
+
+            // Verify two calls to auth provider - initial + retry after revocation
+            await authProvider.Received(2).CreateAuthorizationHeaderAsync(
+                Arg.Any<IEnumerable<string>>(),
+                Arg.Any<DownstreamApiOptions>(),
+                Arg.Any<ClaimsPrincipal?>(),
+                Arg.Any<CancellationToken>());
+
+            // Verify claims were passed on retry
+            Assert.Equal(revocationClaimsB64, capturedOptions!.AcquireTokenOptions.Claims);
+        }
+
+        [Fact]
+        public async Task ManagedIdentity_TokenRevocation_UserAssigned_TriggersRetryWithClaims()
+        {
+            // Arrange - Simulate token revocation scenario with user-assigned MI
+            TokenAcquirerFactoryTesting.ResetTokenAcquirerFactoryInTest();
+            var factory = TokenAcquirerFactory.GetDefaultInstance();
+
+            // Token revocation claims challenge
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
+
+            // Mock auth provider
+            var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
+            DownstreamApiOptions? capturedOptions = null;
+
+            authProvider.CreateAuthorizationHeaderAsync(
+                    Arg.Any<IEnumerable<string>>(),
+                    Arg.Do<DownstreamApiOptions>(o => capturedOptions = o),
+                    Arg.Any<ClaimsPrincipal?>(),
+                    Arg.Any<CancellationToken>())
+                .Returns(ci => "Bearer uami-first-token",
+                         ci => "Bearer uami-second-token-after-revocation");
+
+            // Queue handler: 401 with token revocation - 200 OK
+            var queue = new QueueHttpMessageHandler();
+
+            // 401 response with TokenIssuedBeforeRevocationTimestamp
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
+
+            queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{ \"value\": \"{UamiSecretAfterRevocation}\" }}",
+                                            Encoding.UTF8, "application/json")
+            });
+
+            // DI container
+            var services = new ServiceCollection();
+            services.AddHttpClient("UamiRevocationTestService")
+                    .ConfigurePrimaryHttpMessageHandler(() => queue);
+            services.AddLogging();
+            services.AddTokenAcquisition();
+            services.AddSingleton(authProvider);
+
+            services.AddDownstreamApi("UamiRevocationTestService", opts =>
+            {
+                opts.BaseUrl = "https://api.contoso.com/";
+                opts.RelativePath = "data";
+                opts.RequestAppToken = true;
+                opts.Scopes = [Scope];
+                opts.AcquireTokenOptions = new AcquireTokenOptions
+                {
+                    ManagedIdentity = new ManagedIdentityOptions
+                    {
+                        UserAssignedClientId = UamiClientId
+                    }
+                };
+            });
+
+            var sp = services.BuildServiceProvider();
+            var api = sp.GetRequiredService<IDownstreamApi>();
+
+            // Act
+            VaultSecret? result = await api.GetForAppAsync<VaultSecret>("UamiRevocationTestService");
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(UamiSecretAfterRevocation, result!.Value);
+
+            // Verify two calls to auth provider - initial + retry after revocation
+            await authProvider.Received(2).CreateAuthorizationHeaderAsync(
+                Arg.Any<IEnumerable<string>>(),
+                Arg.Any<DownstreamApiOptions>(),
+                Arg.Any<ClaimsPrincipal?>(),
+                Arg.Any<CancellationToken>());
+
+            // Verify claims were passed on retry
+            Assert.Equal(revocationClaimsB64, capturedOptions!.AcquireTokenOptions.Claims);
+        }
+
+        [Fact]
+        public async Task ManagedIdentity_TokenRevocation_MultipleAttempts_OnlyRetriesOnce()
+        {
+            // Arrange - Verify that token revocation only triggers a single retry
+            TokenAcquirerFactoryTesting.ResetTokenAcquirerFactoryInTest();
+            var factory = TokenAcquirerFactory.GetDefaultInstance();
+
+            // Token revocation claims challenge
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
+
+            // Mock auth provider
+            var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
+
+            authProvider.CreateAuthorizationHeaderAsync(
+                    Arg.Any<IEnumerable<string>>(),
+                    Arg.Any<DownstreamApiOptions>(),
+                    Arg.Any<ClaimsPrincipal?>(),
+                    Arg.Any<CancellationToken>())
+                .Returns("Bearer first-token-revoked", "Bearer second-token-also-revoked");
+
+            // Queue handler: 401 twice (should only retry once)
+            var queue = new QueueHttpMessageHandler();
+
+            // First 401 response with TokenIssuedBeforeRevocationTimestamp
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
+
+            // Second 401 response (should not trigger another retry)
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
+
+            // DI container
+            var services = new ServiceCollection();
+            services.AddHttpClient("MultipleRevocationService")
+                    .ConfigurePrimaryHttpMessageHandler(() => queue);
+            services.AddLogging();
+            services.AddTokenAcquisition();
+            services.AddSingleton(authProvider);
+
+            services.AddDownstreamApi("MultipleRevocationService", opts =>
+            {
+                opts.BaseUrl = "https://api.contoso.com/";
+                opts.RelativePath = "data";
+                opts.RequestAppToken = true;
+                opts.Scopes = [Scope];
+                opts.AcquireTokenOptions = new AcquireTokenOptions
+                {
+                    ManagedIdentity = new ManagedIdentityOptions()
+                };
+            });
+
+            var sp = services.BuildServiceProvider();
+            var api = sp.GetRequiredService<IDownstreamApi>();
+
+            // Act - Should throw after the single retry fails
+            await Assert.ThrowsAsync<HttpRequestException>(
+                () => api.GetForAppAsync<VaultSecret>("MultipleRevocationService"));
+
+            // Assert - Verify only 2 calls were made (initial + 1 retry)
+            await authProvider.Received(2).CreateAuthorizationHeaderAsync(
+                Arg.Any<IEnumerable<string>>(),
+                Arg.Any<DownstreamApiOptions>(),
+                Arg.Any<ClaimsPrincipal?>(),
+                Arg.Any<CancellationToken>());
+        }
+
+        [Fact]
+        public async Task ManagedIdentity_TokenRevocation_WithClientCapabilities_IncludesCp1()
+        {
+            // Arrange - Verify token revocation works with client capabilities
+            TokenAcquirerFactoryTesting.ResetTokenAcquirerFactoryInTest();
+            var factory = TokenAcquirerFactory.GetDefaultInstance();
+
+            // Enable client capabilities
+            factory.Services.Configure<MicrosoftIdentityApplicationOptions>(opts =>
+                opts.ClientCapabilities = ["cp1"]);
+
+            // Token revocation claims challenge
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
+
+            // Mock auth provider
+            var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
+            DownstreamApiOptions? capturedOptions = null;
+
+            authProvider.CreateAuthorizationHeaderAsync(
+                    Arg.Any<IEnumerable<string>>(),
+                    Arg.Do<DownstreamApiOptions>(o => capturedOptions = o),
+                    Arg.Any<ClaimsPrincipal?>(),
+                    Arg.Any<CancellationToken>())
+                .Returns(ci => "Bearer cp1-token-1",
+                         ci => "Bearer cp1-token-2-after-revocation");
+
+            // Queue handler: 401 with token revocation - 200 OK
+            var queue = new QueueHttpMessageHandler();
+
+            // 401 response with TokenIssuedBeforeRevocationTimestamp
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
+
+            queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($"{{ \"value\": \"{Cp1SecretAfterRevocation}\" }}",
+                                            Encoding.UTF8, "application/json")
+            });
+
+            // DI container with factory's services (includes configured capabilities)
+            factory.Services.AddHttpClient("Cp1RevocationService")
+                    .ConfigurePrimaryHttpMessageHandler(() => queue);
+            factory.Services.AddSingleton(authProvider);
+
+            factory.Services.AddDownstreamApi("Cp1RevocationService", opts =>
+            {
+                opts.BaseUrl = "https://api.contoso.com/";
+                opts.RelativePath = "data";
+                opts.RequestAppToken = true;
+                opts.Scopes = [Scope];
+                opts.AcquireTokenOptions = new AcquireTokenOptions
+                {
+                    ManagedIdentity = new ManagedIdentityOptions()
+                };
+            });
+
+            var sp = factory.Build();
+            var api = sp.GetRequiredService<IDownstreamApi>();
+
+            // Act
+            VaultSecret? result = await api.GetForAppAsync<VaultSecret>("Cp1RevocationService");
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal(Cp1SecretAfterRevocation, result!.Value);
+
+            // Verify claims were passed on retry
+            Assert.Equal(revocationClaimsB64, capturedOptions!.AcquireTokenOptions.Claims);
         }
     }
 }
