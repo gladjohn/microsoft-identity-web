@@ -38,6 +38,18 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
 
         private sealed record VaultSecret(string Value);
 
+        // Helper method to create a 401 response with token revocation claims challenge
+        private static HttpResponseMessage CreateTokenRevocationResponse(string claimsChallenge)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            response.Headers.WwwAuthenticate.ParseAdd(
+                $"Bearer realm=\"\", " +
+                $"error=\"insufficient_claims\", " +
+                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
+                $"claims=\"{claimsChallenge}\"");
+            return response;
+        }
+
         [Fact]
         public async Task ManagedIdentity_ReturnsBearerHeader()
         {
@@ -294,8 +306,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var factory = TokenAcquirerFactory.GetDefaultInstance();
 
             // Token revocation claims challenge
-            string revocationClaims = @"{""access_token"":{""nbf"":{""essential"":true,""value"":""1702682181""}}}";
-            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(revocationClaims));
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
 
             // Mock auth provider
             var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
@@ -313,13 +324,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var queue = new QueueHttpMessageHandler();
 
             // 401 response with TokenIssuedBeforeRevocationTimestamp
-            var r401 = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            r401.Headers.WwwAuthenticate.ParseAdd(
-                $"Bearer realm=\"\", " +
-                $"error=\"insufficient_claims\", " +
-                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
-                $"claims=\"{revocationClaimsB64}\"");
-            queue.AddHttpResponseMessage(r401);
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -376,8 +381,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var factory = TokenAcquirerFactory.GetDefaultInstance();
 
             // Token revocation claims challenge
-            string revocationClaims = @"{""access_token"":{""nbf"":{""essential"":true,""value"":""1702682181""}}}";
-            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(revocationClaims));
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
 
             // Mock auth provider
             var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
@@ -395,13 +399,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var queue = new QueueHttpMessageHandler();
 
             // 401 response with TokenIssuedBeforeRevocationTimestamp
-            var r401 = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            r401.Headers.WwwAuthenticate.ParseAdd(
-                $"Bearer realm=\"\", " +
-                $"error=\"insufficient_claims\", " +
-                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
-                $"claims=\"{revocationClaimsB64}\"");
-            queue.AddHttpResponseMessage(r401);
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
@@ -461,8 +459,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var factory = TokenAcquirerFactory.GetDefaultInstance();
 
             // Token revocation claims challenge
-            string revocationClaims = @"{""access_token"":{""nbf"":{""essential"":true,""value"":""1702682181""}}}";
-            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(revocationClaims));
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
 
             // Mock auth provider
             var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
@@ -472,28 +469,16 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
                     Arg.Any<DownstreamApiOptions>(),
                     Arg.Any<ClaimsPrincipal?>(),
                     Arg.Any<CancellationToken>())
-                .Returns("Bearer token-1", "Bearer token-2");
+                .Returns("Bearer first-token-revoked", "Bearer second-token-also-revoked");
 
             // Queue handler: 401 twice (should only retry once)
             var queue = new QueueHttpMessageHandler();
 
             // First 401 response with TokenIssuedBeforeRevocationTimestamp
-            var r401First = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            r401First.Headers.WwwAuthenticate.ParseAdd(
-                $"Bearer realm=\"\", " +
-                $"error=\"insufficient_claims\", " +
-                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
-                $"claims=\"{revocationClaimsB64}\"");
-            queue.AddHttpResponseMessage(r401First);
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
 
             // Second 401 response (should not trigger another retry)
-            var r401Second = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            r401Second.Headers.WwwAuthenticate.ParseAdd(
-                $"Bearer realm=\"\", " +
-                $"error=\"insufficient_claims\", " +
-                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
-                $"claims=\"{revocationClaimsB64}\"");
-            queue.AddHttpResponseMessage(r401Second);
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
 
             // DI container
             var services = new ServiceCollection();
@@ -542,8 +527,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
                 opts.ClientCapabilities = ["cp1"]);
 
             // Token revocation claims challenge
-            string revocationClaims = @"{""access_token"":{""nbf"":{""essential"":true,""value"":""1702682181""}}}";
-            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(revocationClaims));
+            string revocationClaimsB64 = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(CaeClaims));
 
             // Mock auth provider
             var authProvider = Substitute.For<IAuthorizationHeaderProvider>();
@@ -561,13 +545,7 @@ namespace Microsoft.Identity.Web.Tests.Certificateless
             var queue = new QueueHttpMessageHandler();
 
             // 401 response with TokenIssuedBeforeRevocationTimestamp
-            var r401 = new HttpResponseMessage(HttpStatusCode.Unauthorized);
-            r401.Headers.WwwAuthenticate.ParseAdd(
-                $"Bearer realm=\"\", " +
-                $"error=\"insufficient_claims\", " +
-                $"errorDescription=\"Continuous access evaluation resulted in challenge with result: InteractionRequired and code: TokenIssuedBeforeRevocationTimestamp\", " +
-                $"claims=\"{revocationClaimsB64}\"");
-            queue.AddHttpResponseMessage(r401);
+            queue.AddHttpResponseMessage(CreateTokenRevocationResponse(revocationClaimsB64));
 
             queue.AddHttpResponseMessage(new HttpResponseMessage(HttpStatusCode.OK)
             {
